@@ -18,6 +18,7 @@ from jax import lax
 from functools import partial
 
 jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_platform_name", "cpu")
 
 def initialise(ndim):
     twondim = 2.0**ndim
@@ -81,14 +82,14 @@ def prepare_new_call(params,ndim):
     return params
 
 
-def basic_rule(functn,params,ndim):
+def basic_rule(functn,params,ndim,*args):
     params['rgnvol'] = params['twondim']
     
     for j in range(ndim): #Optimize this with jax.lax.scan
         params['rgnvol'] = params['rgnvol']*params['width'][j]
         params['z'] = params['z'].at[j].set(params['center'][j])
 
-    params['sum1'] = functn(params['z'])
+    params['sum1'] = functn(params['z'],*args)
     #Compute the symetric sums of functn(lambda2,0,0,..0) and functn(lambda4,0,0,..0), and 
     #maximum fourth difference
     params['difmax'] = -1.0
@@ -96,14 +97,14 @@ def basic_rule(functn,params,ndim):
     params['sum3'] = 0.0
     for j in range(ndim): #Check if this can be optimized with jax.lax.scan
         params['z'] = params['z'].at[j].set(params['center'][j]-params['lambdas'][0]*params['width'][j])
-        f1 = functn(params['z'])
+        f1 = functn(params['z'],*args)
         params['z'] = params['z'].at[j].set(params['center'][j]+params['lambdas'][0]*params['width'][j])
-        f2 = functn(params['z'])
+        f2 = functn(params['z'],*args)
         params['widthl'] = params['widthl'].at[j].set(params['lambdas'][1]*params['width'][j])
         params['z'] = params['z'].at[j].set(params['center'][j]-params['widthl'][j])
-        f3 = functn(params['z'])
+        f3 = functn(params['z'],*args)
         params['z']= params['z'].at[j].set(params['center'][j]+params['widthl'][j])
-        f4 = functn(params['z'])
+        f4 = functn(params['z'],*args)
         params['sum2'] = params['sum2'] + f1 + f2
         params['sum3'] = params['sum3'] + f3 + f4
         df1 = f1+f2-2.0*params['sum1']
@@ -154,7 +155,7 @@ def basic_rule(functn,params,ndim):
                 for m in range(2):
                     params['widthl'] = params['widthl'].at[k].set(-params['widthl'][k])
                     params['z'] = params['z'].at[k].set(params['center'][k]+params['widthl'][k])
-                    f1 = functn(params['z'])
+                    f1 = functn(params['z'],*args)
                     params['sum4'] = params['sum4'] + f1
             
             params['z'] = params['z'].at[k].set(params['center'][k])
@@ -174,7 +175,7 @@ def basic_rule(functn,params,ndim):
             
             def _outer_if_true(params):
                 params['shrink'] = False
-                f1 = functn(params['z'])
+                f1 = functn(params['z'],*args)
                 params['sum5'] = params['sum5'] + f1
 
                 def _body_loop(j,params):
@@ -239,7 +240,7 @@ def basic_rule(functn,params,ndim):
                             for n in range(2):
                                 params['widthl'] = params['widthl'].at[k].set(-params['widthl'][k])
                                 params['z'] = params['z'].at[k].set(params['center'][k]+params['widthl'][k])
-                                f1 = functn(params['z'])
+                                f1 = functn(params['z'],*args)
                                 params['sum5'] = params['sum5'] + f1
                     
                         params['z'] = params['z'].at[k].set(params['center'][k])
@@ -370,8 +371,8 @@ def order_results(params,ndim):
 
 
 @partial(jax.jit, static_argnames=("functn","ndim","tol","maxpts","maxorder_pf","maxrule_pf"))#,"a","b",))
-def jax_cubature(*, functn : callable, a : jnp.ndarray, b : jnp.ndarray, ndim : int ,tol : float = 1e-8, maxpts : int = 10000,  maxorder_pf : int = 1, maxrule_pf : int = 1) -> tuple:
-    
+#def jax_cubature(functn : callable, a : jnp.ndarray, b : jnp.ndarray, ndim : int ,tol : float = 1e-8, maxpts : int = 10000,  maxorder_pf : int = 1, maxrule_pf : int = 1) -> tuple:
+def jax_cubature(functn,a,b,ndim,*args,tol=1e-8, maxpts=10000,  maxorder_pf=1, maxrule_pf=1):    
     params = {}
     params['ndim'] = ndim
     params['a'] = a
@@ -397,7 +398,7 @@ def jax_cubature(*, functn : callable, a : jnp.ndarray, b : jnp.ndarray, ndim : 
     params['weightsp'] = weightsp
 
 
-    params['lenwrk'] = (2*ndim+3)*(1+params['maxpts']//params['rulcls'])//2
+    params['lenwrk'] = (2*ndim+3)*(1+params['maxpts']//params['rulcls']) #//2 +1
     params['wrkstr'] = jnp.zeros(params['lenwrk']+1)
     params['funcls'] = 0
     
@@ -437,12 +438,12 @@ def jax_cubature(*, functn : callable, a : jnp.ndarray, b : jnp.ndarray, ndim : 
     params['divflg'] = 1  
     params['relerr'] = 1.0
 
-    params['maxloop']  = params['rulcls']*maxrule_pf
-    params['maxorder'] = params['lenwrk']*maxorder_pf
+    params['maxloop']  = jnp.int64(params['rulcls']*maxrule_pf)
+    params['maxorder'] = jnp.int64(params['lenwrk']*maxorder_pf)
 
 
     #Initial call to basic rule
-    params = basic_rule(functn,params,ndim)
+    params = basic_rule(functn,params,ndim,*args)
     #Order and store results of basic rule
     params = order_results(params,ndim)
     #Check the convergence for possible termination.
@@ -455,7 +456,7 @@ def jax_cubature(*, functn : callable, a : jnp.ndarray, b : jnp.ndarray, ndim : 
         #Prepare for new call to basic rule
         params  = prepare_new_call(params,ndim)
         #Call basic rule in the first subregion
-        params = basic_rule(functn, params,ndim)
+        params = basic_rule(functn, params,ndim,*args)
         #Order and store results of basic rule
         params = order_results(params,ndim)
 
@@ -465,11 +466,15 @@ def jax_cubature(*, functn : callable, a : jnp.ndarray, b : jnp.ndarray, ndim : 
         params['subrgn'] = params['sbrgns'] - 1
 
         #Call basic rule in the second subregion
-        params = basic_rule(functn, params,ndim)
+        params = basic_rule(functn, params,ndim,*args)
         #Order and store results of basic rule
         params = order_results(params,ndim)
         #Check the convergence for possible termination.
+        params['relerr'] = 1.0
+        params['wrkstr'] = params['wrkstr'].at[params['lenwrk']].set(jnp.where(params['wrkstr'][params['lenwrk']] <= 0.0, 0.0, params['wrkstr'][params['lenwrk']])
+        )
         params['relerr'] = jnp.where(jnp.abs(params['finest']) != 0.0, params['wrkstr'][params['lenwrk']] / jnp.abs(params['finest']), 1.0)
+        params['relerr'] = jnp.where(params['relerr'] > 1.0, 1.0, params['relerr'])        
         return params
 
     
@@ -483,6 +488,7 @@ def jax_cubature(*, functn : callable, a : jnp.ndarray, b : jnp.ndarray, ndim : 
     params['finest'] = params['finest']*(-1)**params['num_neg']
     return params['finest'], params['relerr'] 
 
+jax_cubature_vectorised = jax.vmap(jax_cubature,in_axes=(None,None,None,None,0))
 
 if __name__ == "__main__":
     def fun(x_array):
