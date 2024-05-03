@@ -1,5 +1,5 @@
 """
-jax_cubature.py
+jax_cubature_develop.py
 
 This module provides tools for numerical integration using JAX, including
 initialization, basic rules, result ordering, and cubature calculations.
@@ -370,15 +370,14 @@ def order_results(params,ndim):
     return params
 
 
-@partial(jax.jit, static_argnames=("functn","ndim","tol","maxpts","maxorder_pf","maxrule_pf"))#,"a","b",))
-#def jax_cubature(functn : callable, a : jnp.ndarray, b : jnp.ndarray, ndim : int ,tol : float = 1e-8, maxpts : int = 10000,  maxorder_pf : int = 1, maxrule_pf : int = 1) -> tuple:
-def jax_cubature(functn,a,b,ndim,*args,tol=1e-8, maxpts=10000,  maxorder_pf=1, maxrule_pf=1):    
+@partial(jax.jit, static_argnames=("functn","ndim","rel_tol","maxpts","maxorder_pf","maxrule_pf"))
+def jax_cubature(functn,a,b,ndim,*args,rel_tol=1e-8, maxpts=10000,  maxorder_pf=1, maxrule_pf=1):    
     params = {}
     params['ndim'] = ndim
     params['a'] = a
     params['b'] = b
     params['maxpts'] = maxpts
-    params['tol'] = tol 
+    params['rel_tol'] = rel_tol 
     
     if ndim < 2:
         raise ValueError("ndim must be greater than 2")
@@ -401,11 +400,6 @@ def jax_cubature(functn,a,b,ndim,*args,tol=1e-8, maxpts=10000,  maxorder_pf=1, m
     params['lenwrk'] = (2*ndim+3)*(1+params['maxpts']//params['rulcls']) #//2 +1
     params['wrkstr'] = jnp.zeros(params['lenwrk']+1)
     params['funcls'] = 0
-    
-    
-    #params['width']  = (params['b']-params['a'])/2.0
-    #params['center'] = params['a'] + params['width']
-    #params['num_neg'] = 0
     params['width']   = (params['b']-params['a'])/2.0
     params['num_neg'] = jnp.sum(params['width'] < 0)
     params['width']   = jnp.fabs(params['width'])
@@ -448,9 +442,9 @@ def jax_cubature(functn,a,b,ndim,*args,tol=1e-8, maxpts=10000,  maxorder_pf=1, m
     params = order_results(params,ndim)
     #Check the convergence for possible termination.
     params['relerr'] = jnp.where(jnp.fabs(params['finest']) != 0.0, params['wrkstr'][params['lenwrk']] / jnp.fabs(params['finest']), 1.0)
-    
+
     def loop_cond(params):
-        return params['relerr'] > params['tol']
+        return params['relerr'] > params['rel_tol']
 
     def update_state(params):
         #Prepare for new call to basic rule
@@ -464,6 +458,7 @@ def jax_cubature(functn,a,b,ndim,*args,tol=1e-8, maxpts=10000,  maxorder_pf=1, m
         params['center'] = params['center'].at[params['divaxo']].set(params['center'][params['divaxo']] + 2.0 * params['width'][params['divaxo']])
         params['sbrgns'] = params['sbrgns'] + params['rgnstr'] + 1
         params['subrgn'] = params['sbrgns'] - 1
+        params['divflg'] = 1
 
         #Call basic rule in the second subregion
         params = basic_rule(functn, params,ndim,*args)
@@ -484,7 +479,7 @@ def jax_cubature(functn,a,b,ndim,*args,tol=1e-8, maxpts=10000,  maxorder_pf=1, m
         return jax.lax.cond(loop_cond(params), update_state, lambda x: x, params ), None
 
     
-    params, _ = jax.lax.scan(loop_step, params, xs=None, length=maxpts//(2*rulcls -2))
+    params, _ = jax.lax.scan(loop_step, params, xs=None, length=maxpts//(2*rulcls -2)+1)
     params['finest'] = params['finest']*(-1)**params['num_neg']
     return params['finest'], params['relerr'] 
 
