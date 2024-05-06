@@ -6,7 +6,7 @@ initialization, basic rules, result ordering, and cubature calculations.
 
 Functions:
     - initialise: Prepares and initializes the parameters for integration.
-    - basic_rule: Applies the basic numerical integration rule.
+    - genz_malik: Applies the basic numerical integration rule.
     - order_results: Orders the results of integration for each subregion.
     - cubature: Performs advanced numerical integration using JAX.
 """
@@ -20,18 +20,15 @@ from functools import partial
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_platform_name", "cpu")
 
-def initialise(ndim):
+def initialise_gm(ndim,params):
     twondim = 2.0**ndim
 
     lambda5 = 9.0/19.0   
     if ndim<=15: 
-    #if ndim <= 2:
-        rulcls = np.int64(2**ndim + 2*ndim*ndim + 2*ndim +1)
         lambda4 = 9.0/10.0
         lambda2 = 9.0/70.0
         weight5 = 1.0/(3.0*lambda5)**3 /twondim
     else:
-        rulcls = np.int64(1 + (ndim*(12+(ndim-1)*(6+(ndim-2)*4)))//3)
         ratio = (ndim-2)/9.0
         lambda4 = (1.0/5.0 -ratio)/(1.0/3.0 -ratio/lambda5)
         ratio = (1.0 -lambda4/lambda5)*(ndim-1)*ratio/6.0
@@ -62,7 +59,87 @@ def initialise(ndim):
     weights  = np.array([weight1, weight2, weight3, weight4, weight5])
     weightsp = np.array([weight1p, weight2p, weight3p, weight4p])
 
-    return rulcls,twondim,ratio,lambdas,weights,weightsp
+    params['twondim'] = twondim
+    params['ratio'] = ratio
+    params['lambdas'] = lambdas
+    params['weights'] = weights
+    params['weightsp'] = weightsp
+
+    return params
+
+def initialise_gk(params):
+    # GK [7, 15] weights from:
+    # https://www.advanpix.com/2011/11/07/gauss-kronrod-quadrature-nodes-weights/
+    # https://github.com/Areustle/cubepy/tree/main
+    params['kronrod_weights'] =  jnp.array([
+        0.022935322010529224963732008058970, 
+        0.063092092629978553290700663189204, 
+        0.104790010322250183839876322541518, 
+        0.140653259715525918745189590510238, 
+        0.169004726639267902826583426598550, 
+        0.190350578064785409913256402421014, 
+        0.204432940075298892414161999234649, 
+        0.209482141084727828012999174891714, 
+        0.204432940075298892414161999234649, 
+        0.190350578064785409913256402421014, 
+        0.169004726639267902826583426598550, 
+        0.140653259715525918745189590510238, 
+        0.104790010322250183839876322541518, 
+        0.063092092629978553290700663189204, 
+        0.022935322010529224963732008058970,  
+    ])
+
+
+    params['kronrod_nodes'] = jnp.array([
+        -0.991455371120812639206854697526329,  
+        -0.949107912342758524526189684047851,  
+        -0.864864423359769072789712788640926,  
+        -0.741531185599394439863864773280788,  
+        -0.586087235467691130294144838258730,  
+        -0.405845151377397166906606412076961, 
+        -0.207784955007898467600689403773245, 
+        0.000000000000000000000000000000000,  
+        0.207784955007898467600689403773245,  
+        0.405845151377397166906606412076961,  
+        0.586087235467691130294144838258730,  
+        0.741531185599394439863864773280788,  
+        0.864864423359769072789712788640926,  
+        0.949107912342758524526189684047851,  
+        0.991455371120812639206854697526329,
+    ])
+
+    params['gauss_weights'] = jnp.array([
+        0.129484966168869693270611432679082, 
+        0.279705391489276667901467771423780, 
+        0.381830050505118944950369775488975, 
+        0.417959183673469387755102040816327, 
+        0.381830050505118944950369775488975, 
+        0.279705391489276667901467771423780, 
+        0.129484966168869693270611432679082,  
+    ])
+
+    params['gauss_nodes'] = jnp.array([
+        -0.949107912342758524526189684047851, 
+        -0.741531185599394439863864773280788, 
+        -0.405845151377397166906606412076961, 
+        0.000000000000000000000000000000000,  
+        0.405845151377397166906606412076961,  
+        0.741531185599394439863864773280788,  
+        0.949107912342758524526189684047851,  
+    ])
+
+    twondim = 2.0
+    params['twondim'] = twondim
+    '''
+    for j in range(15):
+         = params['kronrod_weights'].at[j].set(kw[j])
+         = params['kronrod_nodes'].at[j].set(kn[j])
+
+    for j in range(7):
+        params['gauss_weights'] = params['gauss_weights'].at[j].set(gw[j])
+        params['gauss_nodes'] = params['gauss_nodes'].at[j].set(gn[j])
+    '''
+    return params
 
 
 def prepare_new_call(params,ndim):
@@ -81,11 +158,37 @@ def prepare_new_call(params,ndim):
     params['center'] = params['center'].at[params['divaxo']].set(params['center'][params['divaxo']]-params['width'][params['divaxo']])
     return params
 
+def gauss_kronrod(functn,params,ndim,*args):
+    #Compute the sum at the Gauss and Kronrod nodes
+    sum_gauss = 0.0
+    sum_kronrod = 0.0
 
-def basic_rule(functn,params,ndim,*args):
+    #This can be optimised if functn is vectorized
+    for j in range(15):
+        params['z'] = params['z'].at[0].set(params['center'][0] + params['kronrod_nodes'][j] * params['width'][0])
+        weight = params['kronrod_weights'][j]*params['width'][0]
+        sum_kronrod = sum_kronrod + functn(params['z'],*args)*weight
+        
+    for j in range(7):
+        params['z'] = params['z'].at[0].set(params['center'][0] + params['gauss_nodes'][j] * params['width'][0])
+        weight = params['gauss_weights'][j]*params['width'][0]
+        sum_gauss = sum_gauss + functn(params['z'],*args)*weight
+    
+    #Estimate the error
+    params['rgnerr'] = jnp.abs(sum_kronrod[0]-sum_gauss[0])
+    params['rgnval'] = sum_kronrod[0]
+    
+    #Return the results
+    params['finest'] = params['finest'] + params['rgnval']
+    params['wrkstr'] = params['wrkstr'].at[params['lenwrk']].set(params['wrkstr'][params['lenwrk']]+params['rgnerr'])
+    params['funcls'] = params['funcls']+params['rulcls']
+    return params
+
+
+def genz_malik(functn,params,ndim,*args):
     params['rgnvol'] = params['twondim']
     
-    for j in range(ndim): #Optimize this with jax.lax.scan
+    for j in range(ndim): 
         params['rgnvol'] = params['rgnvol']*params['width'][j]
         params['z'] = params['z'].at[j].set(params['center'][j])
 
@@ -165,8 +268,6 @@ def basic_rule(functn,params,ndim,*args):
     params['sum5'] = 0.0
     
     if ndim<=15:
-    #if ndim<=2:
-    #if False:
         params['widthl'] = -params['lambdas'][2]*params['width']
         params['z'] = params['center']+params['widthl']
         
@@ -255,6 +356,14 @@ def basic_rule(functn,params,ndim,*args):
     params['finest'] = params['finest']+params['rgnval']
     params['wrkstr'] = params['wrkstr'].at[params['lenwrk']].set(params['wrkstr'][params['lenwrk']]+params['rgnerr'])
     params['funcls'] = params['funcls']+params['rulcls']
+    return params
+
+
+def basic_rule(ndim, functn, params, *args):
+    if ndim == 1:
+        params = gauss_kronrod(functn, params, ndim, *args)
+    else:
+        params = genz_malik(functn, params, ndim, *args)
     return params
 
 
@@ -370,8 +479,8 @@ def order_results(params,ndim):
     return params
 
 
-@partial(jax.jit, static_argnames=("functn","ndim","rel_tol","maxpts","maxorder_pf","maxrule_pf"))
-def jax_cubature(functn,a,b,ndim,*args,rel_tol=1e-8, maxpts=10000,  maxorder_pf=1, maxrule_pf=1):    
+@partial(jax.jit, static_argnames=("functn","ndim","rel_tol","maxpts","maxorder","maxrule"))
+def jax_cubature(functn,a,b,ndim,*args,rel_tol=1e-8, maxpts=10000,  maxorder=100, maxrule=100):    
     params = {}
     params['ndim'] = ndim
     params['a'] = a
@@ -379,27 +488,39 @@ def jax_cubature(functn,a,b,ndim,*args,rel_tol=1e-8, maxpts=10000,  maxorder_pf=
     params['maxpts'] = maxpts
     params['rel_tol'] = rel_tol 
     
-    if ndim < 2:
-        raise ValueError("ndim must be greater than 2")
     
     params['rgnstr']  = 2*ndim + 2
     params['divaxo']  = 0
     params['divaxn']  = 0
 
-    #Compute the prefactors required by the cubature rule.
-    rulcls,twondim,ratio,lambdas,weights,weightsp = initialise(ndim)
-    
+    params['kronrod_weights'] = jnp.zeros(15)
+    params['gauss_weights'] = jnp.zeros(7)
+    params['gauss_nodes'] = jnp.zeros(7)
+    params['kronrod_nodes'] = jnp.zeros(15)
+
+    params['rulcls'] = 0
+    params['twondim'] = 0
+    params['ratio'] = 0
+    params['lambdas'] = jnp.zeros(3)
+    params['weights'] = jnp.zeros(5)
+    params['weightsp'] = jnp.zeros(4)
+
+    #Compute the prefactors required by the quadrature/cubature rule/s.
+    if ndim == 1:
+        params = initialise_gk(params)
+        rulcls = 22 # 15 + 7 because we are evaluating twice at the Gauss nodes. To be optimised in the future
+    else:
+        params = initialise_gm(ndim,params)
+        if ndim <= 15:
+            rulcls = 2**ndim + 2*ndim*ndim + 2*ndim +1
+        else:
+            rulcls = 1 + (ndim*(12+(ndim-1)*(6+(ndim-2)*4)))//3
     params['rulcls'] = rulcls
-    params['twondim'] = twondim
-    params['ratio'] = ratio
-    params['lambdas'] = lambdas
-    params['weights'] = weights
-    params['weightsp'] = weightsp
 
-
-    params['lenwrk'] = (2*ndim+3)*(1+params['maxpts']//params['rulcls']) #//2 +1
+    params['lenwrk'] = (2*ndim+3)*(1+params['maxpts']//params['rulcls'])
     params['wrkstr'] = jnp.zeros(params['lenwrk']+1)
     params['funcls'] = 0
+    
     params['width']   = (params['b']-params['a'])/2.0
     params['num_neg'] = jnp.sum(params['width'] < 0)
     params['width']   = jnp.fabs(params['width'])
@@ -432,12 +553,11 @@ def jax_cubature(functn,a,b,ndim,*args,rel_tol=1e-8, maxpts=10000,  maxorder_pf=
     params['divflg'] = 1  
     params['relerr'] = 1.0
 
-    params['maxloop']  = jnp.int64(params['rulcls']*maxrule_pf)
-    params['maxorder'] = jnp.int64(params['lenwrk']*maxorder_pf)
-
+    params['maxloop']  = jnp.int64(maxrule)
+    params['maxorder'] = jnp.int64(maxorder)
 
     #Initial call to basic rule
-    params = basic_rule(functn,params,ndim,*args)
+    params = basic_rule(ndim,functn,params,*args)
     #Order and store results of basic rule
     params = order_results(params,ndim)
     #Check the convergence for possible termination.
@@ -450,7 +570,7 @@ def jax_cubature(functn,a,b,ndim,*args,rel_tol=1e-8, maxpts=10000,  maxorder_pf=
         #Prepare for new call to basic rule
         params  = prepare_new_call(params,ndim)
         #Call basic rule in the first subregion
-        params = basic_rule(functn, params,ndim,*args)
+        params = basic_rule(ndim,functn,params,*args)
         #Order and store results of basic rule
         params = order_results(params,ndim)
 
@@ -459,9 +579,9 @@ def jax_cubature(functn,a,b,ndim,*args,rel_tol=1e-8, maxpts=10000,  maxorder_pf=
         params['sbrgns'] = params['sbrgns'] + params['rgnstr'] + 1
         params['subrgn'] = params['sbrgns'] - 1
         params['divflg'] = 1
-
+        
         #Call basic rule in the second subregion
-        params = basic_rule(functn, params,ndim,*args)
+        params = basic_rule(ndim,functn,params,*args)
         #Order and store results of basic rule
         params = order_results(params,ndim)
         #Check the convergence for possible termination.
@@ -493,14 +613,14 @@ if __name__ == "__main__":
         return x**2 +jnp.log10(y+2)**2.5 + x*z**jnp.log(2)
     a_jax = jnp.array([0, 0, 0])
     b_jax = jnp.array([jnp.pi, jnp.pi, 1])  
-    result, error = jax_cubature(functn=fun, a=a_jax, b=b_jax, ndim=3)
+    result, error = jax_cubature(fun,a_jax,b_jax,3)
     print("Result : ",result)
     print("Estimated error : ",error)
 
     def f(x):
         a_jax = jnp.array([0, 0, 0])
         b_jax = jnp.array([jnp.pi, jnp.pi, x])  
-        result, error = jax_cubature(functn=fun, a=a_jax, b=b_jax, ndim=3)
+        result, error = jax_cubature(fun,a_jax,b_jax,3)
         return result
     
     df = jax.jacfwd(f)
